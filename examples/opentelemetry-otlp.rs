@@ -1,11 +1,11 @@
-use opentelemetry::{global, trace::TracerProvider, Key, KeyValue};
+use opentelemetry::{global, trace::TracerProvider as _, Key, KeyValue};
 use opentelemetry_sdk::{
     metrics::{
         reader::DefaultTemporalitySelector, Aggregation, Instrument, MeterProviderBuilder,
         PeriodicReader, SdkMeterProvider, Stream,
     },
     runtime,
-    trace::{BatchConfig, RandomIdGenerator, Sampler, Tracer},
+    trace::{BatchConfig, RandomIdGenerator, Sampler, TracerProvider},
     Resource,
 };
 use opentelemetry_semantic_conventions::{
@@ -88,9 +88,9 @@ fn init_meter_provider() -> SdkMeterProvider {
     meter_provider
 }
 
-// Construct Tracer for OpenTelemetryLayer
-fn init_tracer() -> Tracer {
-    let provider = opentelemetry_otlp::new_pipeline()
+// Construct TracerProvider for OpenTelemetryLayer
+fn init_tracer_provider() -> TracerProvider {
+    opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_trace_config(
             opentelemetry_sdk::trace::Config::default()
@@ -105,16 +105,15 @@ fn init_tracer() -> Tracer {
         .with_batch_config(BatchConfig::default())
         .with_exporter(opentelemetry_otlp::new_exporter().tonic())
         .install_batch(runtime::Tokio)
-        .unwrap();
-
-    global::set_tracer_provider(provider.clone());
-    provider.tracer("tracing-otel-subscriber")
+        .unwrap()
 }
 
 // Initialize tracing-subscriber and return OtelGuard for opentelemetry-related termination processing
 fn init_tracing_subscriber() -> OtelGuard {
+    let tracer_provider = init_tracer_provider();
     let meter_provider = init_meter_provider();
-    let tracer = init_tracer();
+
+    let tracer = tracer_provider.tracer("tracing-otel-subscriber");
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::filter::LevelFilter::from_level(
@@ -125,19 +124,25 @@ fn init_tracing_subscriber() -> OtelGuard {
         .with(OpenTelemetryLayer::new(tracer))
         .init();
 
-    OtelGuard { meter_provider }
+    OtelGuard {
+        tracer_provider,
+        meter_provider,
+    }
 }
 
 struct OtelGuard {
+    tracer_provider: TracerProvider,
     meter_provider: SdkMeterProvider,
 }
 
 impl Drop for OtelGuard {
     fn drop(&mut self) {
+        if let Err(err) = self.tracer_provider.shutdown() {
+            eprintln!("{err:?}");
+        }
         if let Err(err) = self.meter_provider.shutdown() {
             eprintln!("{err:?}");
         }
-        opentelemetry::global::shutdown_tracer_provider();
     }
 }
 
